@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
-import { addNumeric, maxNumeric, numericToString, subtractNumeric } from '../util/numerics';
+import { addNumeric, maxNumeric, multiplyNumeric, numericToString, subtractNumeric } from '../util/numerics';
+import { createProducerFromTemplate } from './producers';
 
 
 interface GameState {
@@ -11,6 +12,7 @@ interface GameState {
   balance: string,
   kwh: string,
   dpkw: string,
+  rph: number,
 
   entities: {
     workers: Worker[],
@@ -19,7 +21,7 @@ interface GameState {
   }
 
   shop: {
-    producers: Producer[],
+    producers: ProducerTemplate[],
     upgrades: Upgrade[]
   }
 
@@ -39,9 +41,9 @@ interface GameState {
 
 type ProducerTypes = 'solar' | 'fossil' | 'nuclear' | 'hydro' | 'wind' | 'dyson' | 'black_hole' | 'blood';
 
-
 interface Producer {
   id: string,
+  itemId: string, // Identification between shop
   name: string,
 
   basePrice: string, 
@@ -59,9 +61,13 @@ interface ProducerTemplate { // For shop.
   itemId: string, // Defined; not generated like the Producer ID.
   name: string,
   basePrice: string,
+  currentPrice: string,
+
+  risk: number
   type: ProducerTypes,
   stats: ProducerStats,
   researchLocked: boolean,
+  requires?: ProducerId
 }
 
 interface ProducerStats {
@@ -71,13 +77,19 @@ interface ProducerStats {
   // Final kwh: (((currentKwh + additive_modifiers) * mult_modifiers)) * (currentEff / 100) 
 }
 
-interface ResearchProducer {
+interface Researcher {
   id: string,
   name: string,
+  
   basePrice: string,
-  task?: string, // Name of producer or upgrade to reasearch.
-  rph: number, // Research points per hour. RP should stay deflated
+  currentPrice: string,
 
+  stats: ResearcherStats,
+}
+
+interface ResearcherStats {
+  baseRph: number, // Research points per hour. 
+  task: string | null, // Name of producer or upgrade to reasearch.
 }
 
 interface Worker {
@@ -89,7 +101,6 @@ interface Worker {
   // Suppression does not affect factors; They stay the same until unsuppressed.
 
   factors: WorkerFactors,
-  benched: WorkerVacation, // Paid vacations decrease quitFactor and insanityFactor by a lot, unpaid decreases it less. Both increase happiness the same.
 
   wage: number, // Base: $13 + (riskFactor * 2), Max: Unlimited. Increases competence by 1 every dollar after $20, capped at +15
   competence: number, // Base: 0-20 (randomized), Max: 100. 
@@ -97,15 +108,6 @@ interface Worker {
   experience: number, // +1 experience per day.
 
   hiredAt: number, // Timestamp for reference.
-}
-
-interface WorkerVacation {
-  isBenched: boolean,
-  isPaid: boolean,
-  length?: number, // Days
-
-  // Benched Rates:
-  // Unpaid: (-1 insanity factor / day, -1 quit factor / day).
 }
 
 interface WorkerFactors {
@@ -201,10 +203,12 @@ interface GameStore extends GameState {
   addKwh: (amount: string) => void;
   setDpkw: (amount: string) => void;
 
+  // Shop actions
+  initShop: (producers: ProducerTemplate[]) => void;
+
   // Producer actions
-  buyProducer: (payload: BuyProducerPayload) => void;
-  updateProducerPrice: (producerId: string, newPrice: string) => void;
-  unlockProducer: (producerId: string) => void;
+  buyProducer: (producerItemId: string, count: number) => void;
+  updateProducerPrice: (producerItemId: string, newPrice: string) => void;
 
   // Worker actions
   hireWorker: (payload: HireWorkerPayload) => void;
@@ -253,6 +257,7 @@ const initialState: GameState = {
   balance: "1000",
   kwh: "0",
   dpkw: "0",
+  rph: 0,
   entities: {
     workers: [],
     producers: [],
@@ -277,7 +282,6 @@ const initialState: GameState = {
 // Create the store
 export const useGameStore = create<GameStore>()(
   subscribeWithSelector((set, get) => ({
-    // Initial state
     ...initialState,
 
     // Resource actions
@@ -296,40 +300,51 @@ export const useGameStore = create<GameStore>()(
     setDpkw: (amount: string) => set({ dpkw: amount }),
 
     // Producer actions
-    buyProducer: ({ producerId, quantity = 1 }) => set((state) => {
-      const producer = state.entities.producers.find(p => p.id === producerId);
-      if (!producer) return state;
+    buyProducer: (producerItemId: string, count: number) => set((state) => {
+      const producer = state.shop.producers.find(p => p.itemId === producerItemId);
+      if (!producer) { return state; }
 
-      const totalCost = parseFloat(producer.currentPrice) * quantity;
-      if (parseFloat(state.balance) < totalCost) return state;
-
-      return {
-        balance: (parseFloat(state.balance) - totalCost).toString(),
-        entities: {
-          ...state.entities,
-          producers: state.entities.producers.map(p =>
-            p.id === producerId
-              ? { ...p, count: p.count + quantity }
-              : p
-          )
+      const totalCost = numericToString(multiplyNumeric(producer.currentPrice, count.toString()));
+      const isDuplicate = state.entities.producers.find(p => p.itemId === producerItemId);
+      
+      if (isDuplicate)
+        return {
+          balance: numericToString(subtractNumeric(state.balance, totalCost)),
+          entities: {
+            ...state.entities,
+            producers: [
+              ...state.entities.producers.map(
+                p => p.itemId === producer.itemId
+                  ? { ...p, count: p.count + count } : p
+              ),
+              
+            ]
+          }
         }
-      };
+      else {
+        return {
+          balance: numericToString(subtractNumeric(state.balance, totalCost)),
+          entities: {
+            ...state.entities,
+            producers: [
+              ...state.entities.producers,
+              { ...createProducerFromTemplate(producer), count: count, unlockedAt: Date.now() }
+            ]
+          }
+        }
+      }
     }),
 
-    updateProducerPrice: (producerId: string, newPrice: string) => set((state) => ({
-      entities: {
-        ...state.entities,
-        producers: state.entities.producers.map(p =>
-          p.id === producerId ? { ...p, currentPrice: newPrice } : p
-        )
-      }
-    })),
+    initShop: (producers: ProducerTemplate[]) => {
 
-    unlockProducer: (producerId: string) => set((state) => ({
-      entities: {
-        ...state.entities,
-        producers: state.entities.producers.map(p =>
-          p.id === producerId ? { ...p, unlockedAt: Date.now() } : p
+    },
+
+    updateProducerPrice: (producerItemId: string, newPrice: string) => set((state) => ({
+      shop: {
+        ...state.shop,
+        producers: state.shop.producers.map(s => s.itemId === producerItemId 
+          ? { ...s, currentPrice: newPrice }
+          : s
         )
       }
     })),
@@ -339,7 +354,7 @@ export const useGameStore = create<GameStore>()(
       const newWorker: Worker = {
         ...workerTemplate,
         id: generateId(),
-        producerId,
+        producerId: producerId,
         hiredAt: Date.now()
       };
 
@@ -364,7 +379,6 @@ export const useGameStore = create<GameStore>()(
         workers: state.entities.workers.map(w => w.id === workerId ? { ...w,
           benched: {
             isBenched: true,
-            isPaid: paid,
             length: length,
           }
         } : w
@@ -585,4 +599,4 @@ export const useWorkers = () => useGameStore(state => state.entities.workers);
 export const useUpgrades = () => useGameStore(state => state.entities.upgrades);
 export const useUI = () => useGameStore(state => state.ui);
 export const useSettings = () => useGameStore(state => state.settings);
-export type { ProducerTemplate, Worker, Upgrade, Weather }
+export type { Producer, ProducerTemplate, Worker, Upgrade, Weather }
