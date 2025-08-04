@@ -1,6 +1,8 @@
 import { addNumeric, multiplyNumeric, numericToString, parseNumeric } from "../util/numerics";
 import { Producer, ProducerTemplate } from "./store"
 
+// Upgrade ID format: producer_index
+
 export const PRODUCERS: ProducerTemplate[] = [
   {
     itemId: "0",
@@ -13,6 +15,7 @@ export const PRODUCERS: ProducerTemplate[] = [
       baseKwh: "2.4",
       baseEfficiency: 60
     },
+    upgrades: [], // To be populated
     researchLocked: false,
   }
 ]
@@ -28,6 +31,7 @@ export function createProducerFromTemplate(template: ProducerTemplate): Producer
     currentPrice: template.basePrice, // Will be updated by price scaling
     type: template.type,
     stats: { ...template.stats },
+    upgrades: template.upgrades,
     researchLocked: template.researchLocked,
     count: 0,
     unlockedAt: Date.now()
@@ -74,8 +78,7 @@ export function calculateBulkCost(itemId: string, quantity: number, ownedProduce
   
   for (let i = 0; i < quantity; i++) {
     const price = calculateProducerPrice(template.basePrice, startCount + i)
-    totalCost = multiplyNumeric(totalCost, parseNumeric("1"))
-    totalCost = addNumeric(parseNumeric(numericToString(totalCost)), parseNumeric(price))
+    totalCost = addNumeric(totalCost, parseNumeric(price))
   }
   
   return numericToString(totalCost)

@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
-import { addNumeric, maxNumeric, multiplyNumeric, numericToString, subtractNumeric } from '../util/numerics';
+import { addNumeric, maxNumeric, multiplyNumeric, numericToString, parseNumeric, subtractNumeric } from '../util/numerics';
 import { createProducerFromTemplate } from './producers';
 
 
@@ -17,7 +17,8 @@ interface GameState {
   entities: {
     workers: Worker[],
     producers: Producer[],
-    upgrades: Upgrade[]
+    upgrades: Upgrade[],
+    researchers: Researcher[]
   }
 
   shop: {
@@ -32,8 +33,9 @@ interface GameState {
 
   ui: {
     selectedProducer: string | null,
-    rightSideBar: 'producers' | 'workers' | 'upgrades',
-    leftSideBar: 'main' | 'settings' | 'stats'
+    mainWindow: 'main' | 'settings'
+    rightSideBar: 'shop' | 'producers' | 'workers' | 'upgrades',
+    leftSideBar: 'news' | 'stats'
   }
 
   currentWeather: Weather | null,
@@ -49,6 +51,7 @@ interface Producer {
   basePrice: string, 
   type: ProducerTypes,
   stats: ProducerStats,
+  upgrades: Upgrade[],
   researchLocked: boolean // True = hidden until unlocked, false = visible in shop.
   requires?: ProducerId // If it requires another producer
 
@@ -66,6 +69,7 @@ interface ProducerTemplate { // For shop.
   risk: number
   type: ProducerTypes,
   stats: ProducerStats,
+  upgrades: Upgrade[],
   researchLocked: boolean,
   requires?: ProducerId
 }
@@ -102,9 +106,9 @@ interface Worker {
 
   factors: WorkerFactors,
 
-  wage: number, // Base: $13 + (riskFactor * 2), Max: Unlimited. Increases competence by 1 every dollar after $20, capped at +15
-  competence: number, // Base: 0-20 (randomized), Max: 100. 
-  level: number, // +1 level at 6 exp. Requirement equals 2l+4, where l = level.
+  wage: number, // Base: $13/h ($312/day) + (riskFactor * 2), Max: Unlimited. 
+  competence: number, // Base: 0-20, Max: 100. 
+  level: number, // +1 level at 6 exp. Requirement equals 1.1^level.
   experience: number, // +1 experience per day.
 
   hiredAt: number, // Timestamp for reference.
@@ -124,7 +128,9 @@ interface Upgrade {
   cost: string,
   bought: boolean,
   category: 'worker' | 'kwh' | 'global' | 'efficiency',
+  
   requires: string[] // Upgrade IDs that need to be unlocked first.
+  producerBound?: string // ItemID for producer
   unlockedAt?: number,
   effects: UpgradeEffect[]
 }
@@ -133,7 +139,7 @@ interface UpgradeEffect {
   type: 'kwh_add' | 'kwh_mult' | 'worker_competence' | 'cost_reduction' | 'wage_efficiency'
   | 'insanity_factor' | 'happiness_factor' | 'quit_factor',
   target?: string,
-  value: number,
+  value: number | string,
   isPercentage?: boolean
 }
 
@@ -157,8 +163,18 @@ type WorkerId = string;
 type UpgradeId = string;
 
 interface BuyProducerPayload {
-  producerId: ProducerId;
-  quantity?: number;
+  producerItemId: ProducerId;
+  count: number;
+}
+
+interface UpdateProducerPricePayload {
+  producerItemId: string, 
+  newPrice: string
+}
+
+interface InitShopPayload {
+  producers: ProducerTemplate[],
+  upgrades: Upgrade[]
 }
 
 interface HireWorkerPayload {
@@ -204,11 +220,11 @@ interface GameStore extends GameState {
   setDpkw: (amount: string) => void;
 
   // Shop actions
-  initShop: (producers: ProducerTemplate[]) => void;
+  initShop: (payload: InitShopPayload) => void;
 
   // Producer actions
-  buyProducer: (producerItemId: string, count: number) => void;
-  updateProducerPrice: (producerItemId: string, newPrice: string) => void;
+  buyProducer: (payload: BuyProducerPayload) => void;
+  updateProducerPrice: (payload: UpdateProducerPricePayload) => void;
 
   // Worker actions
   hireWorker: (payload: HireWorkerPayload) => void;
@@ -228,8 +244,9 @@ interface GameStore extends GameState {
 
   // UI actions
   setSelectedProducer: (producerId: string | null) => void;
-  setRightSideBar: (tab: 'producers' | 'workers' | 'upgrades') => void;
-  setLeftSideBar: (tab: 'main' | 'settings') => void;
+  setMainWindow: (tab: 'main' | 'settings') => void;
+  setRightSideBar: (tab: "producers" | "workers" | "upgrades" | "shop") => void;
+  setLeftSideBar: (tab: 'news' | 'stats') => void;
 
   // Settings actions
   toggleAutoSave: () => void;
@@ -246,10 +263,8 @@ interface GameStore extends GameState {
   getTotalIncome: () => string;
 }
 
-// Helper function to generate unique IDs
 const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2);
 
-// Initial state
 const initialState: GameState = {
   saveName: "New Game",
   lastSaved: Date.now(),
@@ -261,7 +276,8 @@ const initialState: GameState = {
   entities: {
     workers: [],
     producers: [],
-    upgrades: []
+    upgrades: [],
+    researchers: []
   },
   settings: {
     autoSave: true,
@@ -273,8 +289,9 @@ const initialState: GameState = {
   },
   ui: {
     selectedProducer: null,
+    mainWindow: 'main',
     rightSideBar: 'producers',
-    leftSideBar: 'main'
+    leftSideBar: 'news'
   },
   currentWeather: null,
 };
@@ -300,7 +317,7 @@ export const useGameStore = create<GameStore>()(
     setDpkw: (amount: string) => set({ dpkw: amount }),
 
     // Producer actions
-    buyProducer: (producerItemId: string, count: number) => set((state) => {
+    buyProducer: ({ producerItemId, count }) => set((state) => {
       const producer = state.shop.producers.find(p => p.itemId === producerItemId);
       if (!producer) { return state; }
 
@@ -335,11 +352,15 @@ export const useGameStore = create<GameStore>()(
       }
     }),
 
-    initShop: (producers: ProducerTemplate[]) => {
+    initShop: ({ producers, upgrades }) => set((state) => ({
+      shop: {
+        ...state.shop,
+        producers: producers,
+        upgrades: upgrades
+      }
+    })),
 
-    },
-
-    updateProducerPrice: (producerItemId: string, newPrice: string) => set((state) => ({
+    updateProducerPrice: ({ producerItemId, newPrice }) => set((state) => ({
       shop: {
         ...state.shop,
         producers: state.shop.producers.map(s => s.itemId === producerItemId 
@@ -472,6 +493,10 @@ export const useGameStore = create<GameStore>()(
       ui: { ...state.ui, selectedProducer: producerId }
     })),
 
+    setMainWindow: (tab) => set((state) => ({
+      ui: { ...state.ui, mainWindow: tab }
+    })),
+
     setRightSideBar: (tab) => set((state) => ({
       ui: { ...state.ui, rightSideBar: tab }
     })),
@@ -530,10 +555,10 @@ export const useGameStore = create<GameStore>()(
           if (effect.target === producerId || !effect.target) {
             switch (effect.type) {
               case 'kwh_add':
-                baseKwh += effect.value;
+                baseKwh += typeof effect.value === "string" ? parseFloat(effect.value) : effect.value;
                 break;
               case 'kwh_mult':
-                kwhMultiplier *= (1 + effect.value / 100);
+                kwhMultiplier *= (1 + (typeof effect.value === "string" ? parseFloat(effect.value) : effect.value) / 100);
                 break;
               default:
                 break;
