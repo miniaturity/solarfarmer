@@ -6,6 +6,8 @@ export const UPGRADES: Upgrade[] = [
         id: "sp_0",
         name: "Better Batteries",
         description: "Better batteries allows for more power to be stored, increasing energy output.",
+        icon: "",
+        
         cost: "750",
         bought: false,
         category: 'efficiency',

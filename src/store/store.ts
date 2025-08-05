@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
 import { addNumeric, maxNumeric, multiplyNumeric, numericToString, parseNumeric, subtractNumeric } from '../util/numerics';
-import { createProducerFromTemplate } from './producers';
+import { calculateBulkCost, createProducerFromTemplate } from './producers';
 
 
 interface GameState {
@@ -10,13 +10,17 @@ interface GameState {
   version: string,
 
   balance: string,
+  rp: number,
   kwh: string,
   dpkw: string,
   rph: number,
 
+  date: string,
+  
+
   entities: {
     workers: Worker[],
-    producers: Producer[],
+    producers: Producer[], 
     upgrades: Upgrade[],
     researchers: Researcher[]
   }
@@ -47,6 +51,7 @@ interface Producer {
   id: string,
   itemId: string, // Identification between shop
   name: string,
+  icon: string,
 
   basePrice: string, 
   type: ProducerTypes,
@@ -63,6 +68,7 @@ interface Producer {
 interface ProducerTemplate { // For shop.
   itemId: string, // Defined; not generated like the Producer ID.
   name: string,
+  icon: string,
   basePrice: string,
   currentPrice: string,
 
@@ -96,10 +102,17 @@ interface ResearcherStats {
   task: string | null, // Name of producer or upgrade to reasearch.
 }
 
+interface ResearcherUnlock {
+  itemId: string,
+  name: string,
+  icon: string,
+}
+
 interface Worker {
   id: string,
   producerId: string, // Assigned producer.
   name?: string,
+  icon: string,
   jobName: string,
   isSuppressed: boolean, // Doesnt work for the day if suppressed. Persists for entire day and checks if it is still suppressed every day.
   // Suppression does not affect factors; They stay the same until unsuppressed.
@@ -124,6 +137,7 @@ interface WorkerFactors {
 interface Upgrade {
   id: string,
   name: string,
+  icon: string,
   description: string,
   cost: string,
   bought: boolean,
@@ -210,6 +224,14 @@ interface ComputedWorkerStats {
   efficiencyContribution: number;
 }
 
+interface CalcProducerPricesPayload {
+  count: number;
+}
+
+interface Price {
+  itemId: string,
+  cost: string,
+}
 
 
 interface GameStore extends GameState {
@@ -219,8 +241,12 @@ interface GameStore extends GameState {
   addKwh: (amount: string) => void;
   setDpkw: (amount: string) => void;
 
+  // Time actions
+  nextHour: () => void;
+
   // Shop actions
   initShop: (payload: InitShopPayload) => void;
+  calcProducerPrices: (payload: CalcProducerPricesPayload) => void;
 
   // Producer actions
   buyProducer: (payload: BuyProducerPayload) => void;
@@ -265,14 +291,22 @@ interface GameStore extends GameState {
 
 const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2);
 
+function toStartOfDay(date: Date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 0, 0, 0, 0));
+}
+
 const initialState: GameState = {
   saveName: "New Game",
   lastSaved: Date.now(),
   version: "1.0.0",
+
   balance: "1000",
+  rp: 0,
   kwh: "0",
   dpkw: "0",
   rph: 0,
+  date: new Date(toStartOfDay(new Date())).toISOString(),
+
   entities: {
     workers: [],
     producers: [],
@@ -324,6 +358,8 @@ export const useGameStore = create<GameStore>()(
       const totalCost = numericToString(multiplyNumeric(producer.currentPrice, count.toString()));
       const isDuplicate = state.entities.producers.find(p => p.itemId === producerItemId);
       
+      
+
       if (isDuplicate)
         return {
           balance: numericToString(subtractNumeric(state.balance, totalCost)),
@@ -359,6 +395,51 @@ export const useGameStore = create<GameStore>()(
         upgrades: upgrades
       }
     })),
+
+    calcProducerPrices: ({ count = 1 }) => set((state) => {
+      const originalProducers = state.shop.producers;
+      let newProducers: ProducerTemplate[] = [];
+
+      originalProducers.forEach((prod) => {
+        const newPrice = calculateBulkCost(prod.itemId, count, state.entities.producers);
+        newProducers.push({
+          ...prod,
+          currentPrice: newPrice
+        })
+      })
+
+      const originalOwnedProducers = state.entities.producers;
+      let newOgProducers: Producer[] = [];
+
+      originalOwnedProducers.forEach((prod) => {
+        const newPrice = calculateBulkCost(prod.itemId, count, state.entities.producers);
+        newOgProducers.push({
+          ...prod,
+          currentPrice: newPrice
+        })
+      })
+
+      return ({
+        entities: {
+          ...state.entities,
+          producers: newOgProducers
+        },
+        shop: {
+          ...state.shop,
+          producers: newProducers
+        }
+      })
+    }),
+
+    nextHour: () => set((state) => {
+      const currentDate = new Date(state.date);
+      const nextDate = new Date(currentDate);
+      nextDate.setHours(currentDate.getHours() + 1); // Handles day/month/year rollover
+
+      return {
+        date: nextDate.toISOString()
+      };
+    }),
 
     updateProducerPrice: ({ producerItemId, newPrice }) => set((state) => ({
       shop: {

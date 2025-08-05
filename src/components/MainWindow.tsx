@@ -4,8 +4,6 @@ import '../styles/Main.css'
 export const MainWindow: React.FC = () => {
   const gs = useGameStore();
 
-
-
   return (
     <div className="m_window">
       <div className="m-news">

@@ -9,6 +9,7 @@ export const PRODUCERS: ProducerTemplate[] = [
     name: "Solar Panel",
     basePrice: "1000",
     currentPrice: "1000",
+    icon: "",
     risk: 0,
     type: 'solar',
     stats: {
@@ -27,6 +28,7 @@ export function createProducerFromTemplate(template: ProducerTemplate): Producer
     id: generateId(),
     itemId: template.itemId,
     name: template.name,
+    icon: template.icon,
     basePrice: template.basePrice,
     currentPrice: template.basePrice, // Will be updated by price scaling
     type: template.type,
@@ -83,6 +85,26 @@ export function calculateBulkCost(itemId: string, quantity: number, ownedProduce
   
   return numericToString(totalCost)
 }
+
+interface Price {
+  itemId: string,
+  cost: string,
+}
+
+export function calculatePrices(ownedProducers: Producer[], producers: ProducerTemplate[], count: number): Price[] {
+    let prices: Price[] = [];
+
+    producers.forEach(producer => {
+      const price = calculateBulkCost(producer.itemId, count, ownedProducers);
+      prices.push({
+        itemId: producer.itemId,
+        cost: price,
+      })
+    })
+
+    return prices;
+  }
+
 
 export function getProducersByType(availableProducers: ProducerTemplate[]) {
   const grouped = {
