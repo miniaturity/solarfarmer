@@ -1,5 +1,5 @@
 import { PRODUCERS } from "./producers";
-import type { Upgrade } from "./store";
+import type { Producer, Upgrade } from "./store";
 
 export const UPGRADES: Upgrade[] = [
   {
@@ -9,7 +9,6 @@ export const UPGRADES: Upgrade[] = [
         icon: "",
         
         cost: "750",
-        bought: false,
         category: 'efficiency',
         requires: [],
         producerBound: "0",
@@ -45,5 +44,22 @@ export function getUpgradeByProducer(producerItemId?: string) {
 
   if (producerItemId) return grouped.find(item => item.producer === producerItemId);
   return grouped;
+}
+
+export function getAvailableUpgrades(ownedProducers: Producer[], ownedUpgrades: Upgrade[]) {
+  return UPGRADES.filter(upg => {
+    if (upg.requires.length === 0 && !upg.producerBound) return true;
+
+    let available = true;
+    for (const req in upg.requires) 
+      if (!ownedUpgrades.find(upgr => upgr.id === req)) available = false;
+    if (upg.producerBound && !ownedProducers.find(prod => prod.itemId === upg.producerBound)) 
+      available = false;
+    if (ownedUpgrades.includes(upg))
+      available = false;
+    
+    
+    return available;
+  })
 }
 

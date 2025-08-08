@@ -1,39 +1,53 @@
 import { useEffect, useState } from "react";
-import { Producer, ProducerTemplate, useGameStore } from "../store/store";
-import { calculateBulkCost, calculateProducerPrice, getAvailableProducers, PRODUCERS } from "../store/producers";
-import { UPGRADES } from "../store/upgrades";
-import { multiplyNumeric, numericToString } from "../util/numerics";
+import { useGameStore } from "../store/store";
+import { getAvailableProducers } from "../store/producers";
+import { getAvailableUpgrades, } from "../store/upgrades";
+import '../styles/css/Right.css'
 
 export const RightBar: React.FC = () => {
   const gs = useGameStore();
   const [buyCount, setBuyCount] = useState<number>(1);
-  const counts = [1, 2, 5, 10, 50, 100]
+  const counts = [1, 2, 5, 10, 50, 100];
+
 
   useEffect(() => {
-    gs.calcProducerPrices({ count: buyCount });
     populateShop();
-  }, [
-    buyCount
-  ])
+    gs.calcProducerPrices({ count: 1 });
+  }, []);
+
+  useEffect(() => {
+    populateShop();
+    gs.calcProducerPrices({ count: buyCount });
+  }, [gs.entities.producers, gs.entities.upgrades]);
 
 
   const populateShop = () => {
     const producers = getAvailableProducers(gs.entities.producers);
-    gs.initShop({ producers: producers, upgrades: UPGRADES });
+    const upgrades = getAvailableUpgrades(gs.entities.producers, gs.entities.upgrades);
+
+    gs.initShop({ producers: producers, upgrades: upgrades });
   }
   
   const buyProducers = (itemId: string, count: number) => {
     const producer = getAvailableProducers(gs.entities.producers).find(p => p.itemId === itemId);
-    if (!producer) return;
-
-    const calculatedCost = calculateProducerPrice(producer.basePrice, gs.entities.producers.find(prod => prod.itemId === itemId)?.count || count);
-    if (parseFloat(gs.balance) - parseFloat(calculatedCost) < 0) return;
-
+    if (!producer) { 
+      console.error("producer not found");
+      return; 
+    }
     gs.buyProducer({ producerItemId: itemId, count: count });
-    gs.subtractBalance(numericToString(multiplyNumeric(producer.currentPrice, count)))
   }
 
-  
+  const buyUpgrade = (id: string) => {
+    const upgrade = gs.shop.upgrades.find(upg => upg.id === id)
+    if (!upgrade) return;
+
+    gs.buyUpgrade({ upgradeId: id });
+  }
+
+  const handleQtyChange = (newQty: number) => {
+    gs.calcProducerPrices({ count: newQty });
+    setBuyCount(newQty);
+  }  
 
 
   return (
@@ -42,7 +56,7 @@ export const RightBar: React.FC = () => {
         <div className="rs-count">
           {counts.map(count => {
             return (
-              <button className={`rsc-button`} id={count.toString()} onClick={() => setBuyCount(count)}>
+              <button className={`rsc-button`} id={count.toString()} onClick={() => handleQtyChange(count)} key={count}>
                 {count}
               </button>
             )
@@ -53,17 +67,35 @@ export const RightBar: React.FC = () => {
             (producer, index) => {
 
               return (
-                <div className="rs-item" key={index} onClick={() => buyProducers(producer.itemId, buyCount)}>
-                  <div className="rsi-name">
+                <div className="rsp-item" key={index} onClick={() => buyProducers(producer.itemId, buyCount)}>
+                  <div className="rspi-name">
                     {producer.name} {`(${producer.itemId})`}
                   </div>
-                  <div className="rsi-info">
+                  <div className="rspi-info">
                     {producer.currentPrice}
                   </div>
                 </div>
               )
             }
           )}   
+        </div>
+        <div className="rs-upgrades">
+          {gs.shop.upgrades.map(
+            (upgrade, index) => {
+              
+              return (
+                <div className="rsu-item" key={index} onClick={() => buyUpgrade(upgrade.id)}>
+                  <div className="rsui-name">
+                      {upgrade.name} {`(${upgrade.id})`}
+                  </div>
+                  <div className="rsui-info">
+                    {upgrade.cost}
+                  </div>
+                </div>
+              )
+            }
+          )
+          }
         </div>
       </div>   
     </div>

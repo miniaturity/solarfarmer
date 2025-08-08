@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
 import { addNumeric, maxNumeric, multiplyNumeric, numericToString, parseNumeric, subtractNumeric } from '../util/numerics';
-import { calculateBulkCost, createProducerFromTemplate } from './producers';
+import { calculateBulkCost, canAffordProducer, createProducerFromTemplate } from './producers';
 
 
 interface GameState {
@@ -22,7 +22,8 @@ interface GameState {
     workers: Worker[],
     producers: Producer[], 
     upgrades: Upgrade[],
-    researchers: Researcher[]
+    researchers: Researcher[],
+    modifiers: Modifier[],
   }
 
   shop: {
@@ -117,22 +118,13 @@ interface Worker {
   isSuppressed: boolean, // Doesnt work for the day if suppressed. Persists for entire day and checks if it is still suppressed every day.
   // Suppression does not affect factors; They stay the same until unsuppressed.
 
-  factors: WorkerFactors,
-
   wage: number, // Base: $13/h ($312/day) + (riskFactor * 2), Max: Unlimited. 
-  competence: number, // Base: 0-20, Max: 100. 
   level: number, // +1 level at 6 exp. Requirement equals 1.1^level.
   experience: number, // +1 experience per day.
 
   hiredAt: number, // Timestamp for reference.
 }
 
-interface WorkerFactors {
-  riskFactor: number, // How risky the job assigned to worker is can affect the requested pay. (1-1000)
-  quitFactor: number, // Every day the wage is below requested by riskFactor, quitFactor increases. Worker quits at 100 (base: 0)
-  insanityFactor: number, // Every +1 insanityFactor = -1 competence. Use upgrades to prolong workers.
-  happinessFactor: number, // Every +1 happinessFactor = +1 competence, max 10 happiness.
-}
 
 interface Upgrade {
   id: string,
@@ -140,7 +132,6 @@ interface Upgrade {
   icon: string,
   description: string,
   cost: string,
-  bought: boolean,
   category: 'worker' | 'kwh' | 'global' | 'efficiency',
   
   requires: string[] // Upgrade IDs that need to be unlocked first.
@@ -150,8 +141,7 @@ interface Upgrade {
 }
 
 interface UpgradeEffect {
-  type: 'kwh_add' | 'kwh_mult' | 'worker_competence' | 'cost_reduction' | 'wage_efficiency'
-  | 'insanity_factor' | 'happiness_factor' | 'quit_factor',
+  type: 'kwh_add' | 'kwh_mult' | 'cost_reduction' | 'wage_efficiency',
   target?: string,
   value: number | string,
   isPercentage?: boolean
@@ -159,11 +149,12 @@ interface UpgradeEffect {
 
 interface Weather {
   name: string,
-  effects: WeatherEffect[],
-  chance: number, // Rolled once per day.
+  effects?: WeatherEffect[],
+  chance: number, // Rolled once per day (if length === 0).
+  length: number | null,
 }
 
-type WeatherEffects = 'kwh_add' | 'kwh_mult' | 'riskFactor_mult' | 'riskFactor_add' | 'suppress_producer' | 'suppress_worker';
+type WeatherEffects = 'kwh_add' | 'kwh_mult' | 'suppress_producer' | 'suppress_worker';
 
 interface WeatherEffect {
   affects: 'global' | 'producer_specific' | 'producer_type',
@@ -171,6 +162,23 @@ interface WeatherEffect {
   producerTarget?: string, // By name, not ID.
   type: WeatherEffects[]
 }
+
+interface Modifier {
+  id: string, // Unique!!!!,
+  name: string,
+  length: number, // Ticks (0.05s/tick)
+  affects: 'global' | 'producer',
+  producer?: string,
+  mods: Mod[]
+}
+
+interface Mod {
+  type: ModType,
+  value: string,
+}
+
+type ModType = 'kwh_add' | 'kwh_mult' | 'cr_add' | 'cr_mult'
+ // cr = conversion rate
 
 type ProducerId = string;
 type WorkerId = string;
@@ -206,13 +214,9 @@ interface BuyUpgradePayload {
   upgradeId: UpgradeId;
 }
 
-interface TrainWorkerPayload {
-  workerId: WorkerId;
-  trainingCost: number;
-  competenceIncrease: number;
-}
 
 interface ComputedProducerStats {
+  id: string,
   totalKwh: string;
   totalEfficiency: number;
   effectiveKwh: string; // After efficiency
@@ -221,16 +225,16 @@ interface ComputedProducerStats {
 
 interface ComputedWorkerStats {
   totalWageCost: number;
-  efficiencyContribution: number;
 }
 
 interface CalcProducerPricesPayload {
   count: number;
 }
 
-interface Price {
-  itemId: string,
-  cost: string,
+interface SellProducerPayload {
+  producerId: string,
+  count: number,
+  sellPrice: string,
 }
 
 
@@ -239,6 +243,7 @@ interface GameStore extends GameState {
   addBalance: (amount: string) => void;
   subtractBalance: (amount: string) => void;
   addKwh: (amount: string) => void;
+  setKwh: (amount: string) => void;
   setDpkw: (amount: string) => void;
 
   // Time actions
@@ -250,19 +255,18 @@ interface GameStore extends GameState {
 
   // Producer actions
   buyProducer: (payload: BuyProducerPayload) => void;
+  sellProducer: (payload: SellProducerPayload) => void;
   updateProducerPrice: (payload: UpdateProducerPricePayload) => void;
 
   // Worker actions
   hireWorker: (payload: HireWorkerPayload) => void;
   fireWorker: (workerId: string) => void;
   benchWorker: (payload: BenchWorkerPayload) => void;
-  trainWorker: (payload: TrainWorkerPayload) => void;
   updateWorkerWage: (workerId: string, newWage: number) => void;
   addWorkerExperience: (workerId: string, exp: number) => void;
 
   // Upgrade actions
   buyUpgrade: (payload: BuyUpgradePayload) => void;
-  unlockUpgrade: (upgradeId: string) => void;
 
   // Weather actions
   setWeather: (payload: Weather) => void;
@@ -300,7 +304,7 @@ const initialState: GameState = {
   lastSaved: Date.now(),
   version: "1.0.0",
 
-  balance: "1000",
+  balance: "10000",
   rp: 0,
   kwh: "0",
   dpkw: "0",
@@ -311,7 +315,8 @@ const initialState: GameState = {
     workers: [],
     producers: [],
     upgrades: [],
-    researchers: []
+    researchers: [],
+    modifiers: []
   },
   settings: {
     autoSave: true,
@@ -348,6 +353,10 @@ export const useGameStore = create<GameStore>()(
       kwh: numericToString(addNumeric(state.kwh, amount))
     })),
 
+    setKwh: (amount: string) => set((state) => ({
+      kwh: amount
+    })),
+
     setDpkw: (amount: string) => set({ dpkw: amount }),
 
     // Producer actions
@@ -355,10 +364,13 @@ export const useGameStore = create<GameStore>()(
       const producer = state.shop.producers.find(p => p.itemId === producerItemId);
       if (!producer) { return state; }
 
+
       const totalCost = numericToString(multiplyNumeric(producer.currentPrice, count.toString()));
       const isDuplicate = state.entities.producers.find(p => p.itemId === producerItemId);
       
+      if (!canAffordProducer) return { ...state };
       
+
 
       if (isDuplicate)
         return {
@@ -388,6 +400,22 @@ export const useGameStore = create<GameStore>()(
       }
     }),
 
+    sellProducer: ({ producerId, count, sellPrice }) => set((state) => {
+      const producer = state.entities.producers.find(prod => prod.itemId === producerId);
+      if (!producer) return { ...state };
+
+      
+
+      return {
+        ...state,
+        balance: numericToString(addNumeric(state.balance, parseNumeric(sellPrice))),
+        entities: {
+          ...state.entities,
+          producers: state.entities.producers.map(p => p.itemId === producerId ? { ...p, count: p.count - count} : p)
+        }
+      }
+    }),
+
     initShop: ({ producers, upgrades }) => set((state) => ({
       shop: {
         ...state.shop,
@@ -397,38 +425,21 @@ export const useGameStore = create<GameStore>()(
     })),
 
     calcProducerPrices: ({ count = 1 }) => set((state) => {
-      const originalProducers = state.shop.producers;
-      let newProducers: ProducerTemplate[] = [];
+      const updatedShopProducers = state.shop.producers.map((shopProducer) => {
+        const bulkCost = calculateBulkCost(shopProducer.itemId, count, state.entities.producers);
+        
+        return {
+          ...shopProducer,
+          currentPrice: bulkCost
+        };
+      });
 
-      originalProducers.forEach((prod) => {
-        const newPrice = calculateBulkCost(prod.itemId, count, state.entities.producers);
-        newProducers.push({
-          ...prod,
-          currentPrice: newPrice
-        })
-      })
-
-      const originalOwnedProducers = state.entities.producers;
-      let newOgProducers: Producer[] = [];
-
-      originalOwnedProducers.forEach((prod) => {
-        const newPrice = calculateBulkCost(prod.itemId, count, state.entities.producers);
-        newOgProducers.push({
-          ...prod,
-          currentPrice: newPrice
-        })
-      })
-
-      return ({
-        entities: {
-          ...state.entities,
-          producers: newOgProducers
-        },
+      return {
         shop: {
           ...state.shop,
-          producers: newProducers
+          producers: updatedShopProducers
         }
-      })
+      };
     }),
 
     nextHour: () => set((state) => {
@@ -488,22 +499,6 @@ export const useGameStore = create<GameStore>()(
       }
     })),
 
-    trainWorker: ({ workerId, trainingCost, competenceIncrease }) => set((state) => {
-      if (parseFloat(state.balance) < trainingCost) return state;
-
-      return {
-        balance: (parseFloat(state.balance) - trainingCost).toString(),
-        entities: {
-          ...state.entities,
-          workers: state.entities.workers.map(w =>
-            w.id === workerId
-              ? { ...w, competence: Math.min(100, w.competence + competenceIncrease) }
-              : w
-          )
-        }
-      };
-    }),
-
     updateWorkerWage: (workerId: string, newWage: number) => set((state) => ({
       entities: {
         ...state.entities,
@@ -537,31 +532,23 @@ export const useGameStore = create<GameStore>()(
 
     // Upgrade actions
     buyUpgrade: ({ upgradeId }) => set((state) => {
-      const upgrade = state.entities.upgrades.find(u => u.id === upgradeId);
-      if (!upgrade || upgrade.bought) return state;
+      const upgrade = state.shop.upgrades.find(u => u.id === upgradeId);
+      if (!upgrade) return state;
 
       const cost = parseFloat(upgrade.cost);
       if (parseFloat(state.balance) < cost) return state;
+
+      const isDuplicate = state.entities.upgrades.find(upg => upg.id === upgradeId);
+      if (isDuplicate) return state;
 
       return {
         balance: (parseFloat(state.balance) - cost).toString(),
         entities: {
           ...state.entities,
-          upgrades: state.entities.upgrades.map(u =>
-            u.id === upgradeId ? { ...u, bought: true } : u
-          )
+          upgrades: [...state.entities.upgrades, upgrade]
         }
       };
     }),
-
-    unlockUpgrade: (upgradeId: string) => set((state) => ({
-      entities: {
-        ...state.entities,
-        upgrades: state.entities.upgrades.map(u =>
-          u.id === upgradeId ? { ...u, unlockedAt: Date.now() } : u
-        )
-      }
-    })),
 
     // Weather actions
     setWeather: (weather: Weather) => set((state) => ({
@@ -605,25 +592,16 @@ export const useGameStore = create<GameStore>()(
     resetGame: () => set(initialState),
 
     // Computed getters
-    getProducerStats: (producerId: string): ComputedProducerStats | null => {
+    getProducerStats: (producerItemId: string): ComputedProducerStats | null => {
       const state = get();
-      const producer = state.entities.producers.find(p => p.id === producerId);
+      const producer = state.entities.producers.find(p => p.itemId === producerItemId);
       if (!producer) return null;
 
-      const workers = state.entities.workers.filter(w => w.producerId === producerId);
-      const upgrades = state.entities.upgrades.filter(u => u.bought);
+      const upgrades = state.entities.upgrades;
+      const modifiers = state.entities.modifiers;
 
       // Calculate efficiency based on worker competence
       let totalEfficiency = producer.stats.baseEfficiency;
-      workers.forEach(worker => {
-        if (worker.competence < 70) {
-          totalEfficiency -= (70 - worker.competence) * 2;
-        } else if (worker.competence === 100) {
-          totalEfficiency += 30; // +3 for perfect competence
-        } else {
-          totalEfficiency += (worker.competence - 70) * 2;
-        }
-      });
 
       totalEfficiency = Math.min(100, Math.max(0, totalEfficiency));
 
@@ -633,7 +611,7 @@ export const useGameStore = create<GameStore>()(
 
       upgrades.forEach(upgrade => {
         upgrade.effects.forEach(effect => {
-          if (effect.target === producerId || !effect.target) {
+          if (effect.target === producerItemId || !effect.target) {
             switch (effect.type) {
               case 'kwh_add':
                 baseKwh += typeof effect.value === "string" ? parseFloat(effect.value) : effect.value;
@@ -648,12 +626,31 @@ export const useGameStore = create<GameStore>()(
         });
       });
 
-      const totalKwh = (baseKwh * kwhMultiplier * producer.count).toString();
-      const effectiveKwh = (parseFloat(totalKwh) * (totalEfficiency / 100)).toString();
+      modifiers.forEach(modifier => {
+        const affectsThis = modifier.affects === "producer" && modifier.producer && modifier.producer === producer.itemId;
+        if (modifier.affects === 'global' || affectsThis) {
+          modifier.mods.forEach(mod => {
+            switch (mod.type) {
+              case "kwh_add":
+                baseKwh += parseFloat(mod.value);
+                break;
+              case "kwh_mult":
+                kwhMultiplier *= parseFloat(mod.value);
+                break;
+              default:
+                break;
+            }
+          })
+        }
+      })
+
+      const totalKwh = (baseKwh * kwhMultiplier * producer.count).toFixed(2).toString();
+      const effectiveKwh = (parseFloat(totalKwh) * (totalEfficiency / 100)).toFixed(2).toString();
 
       const profitPerHour = effectiveKwh; 
 
       return {
+        id: producerItemId,
         totalKwh,
         totalEfficiency,
         effectiveKwh,
@@ -666,19 +663,9 @@ export const useGameStore = create<GameStore>()(
       const workers = state.entities.workers.filter(w => w.producerId === producerId);
 
       const totalWageCost = workers.reduce((sum, worker) => sum + worker.wage, 0);
-      const efficiencyContribution = workers.reduce((sum, worker) => {
-        if (worker.competence < 70) {
-          return sum - ((70 - worker.competence) * 2);
-        } else if (worker.competence === 100) {
-          return sum + 30;
-        } else {
-          return sum + ((worker.competence - 70) * 2);
-        }
-      }, 0);
-
+      
       return {
         totalWageCost,
-        efficiencyContribution
       };
     },
 
@@ -705,4 +692,4 @@ export const useWorkers = () => useGameStore(state => state.entities.workers);
 export const useUpgrades = () => useGameStore(state => state.entities.upgrades);
 export const useUI = () => useGameStore(state => state.ui);
 export const useSettings = () => useGameStore(state => state.settings);
-export type { Producer, ProducerTemplate, Worker, Upgrade, Weather }
+export type { Producer, ProducerTemplate, Worker, Upgrade, Researcher, Weather }

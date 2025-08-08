@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useGameStore } from "../store/store"
+import '../styles/css/Left.css'
 
 export const LeftBar: React.FC = () => {
   const gs = useGameStore();
@@ -22,8 +23,9 @@ export const LeftBar: React.FC = () => {
   return (
     <div className="l_sidebar">
       <div className="l-stats">
-        <span>balance: {gs.balance}</span>
-        <span>date: {`${date}, ${hour}`}</span>
+        <span>balance: {gs.balance} </span>
+        <span>date: {`${date}, ${hour} `}</span>
+        <span>weather: {`${gs.currentWeather}`}</span>
       </div>
     </div>
   )

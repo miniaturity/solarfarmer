@@ -42,7 +42,7 @@ export function createProducerFromTemplate(template: ProducerTemplate): Producer
 
 export function calculateProducerPrice(basePrice: string, currentCount: number): string {
   const base = parseNumeric(basePrice)
-  const multiplier = Math.pow(1.15, currentCount)
+  const multiplier = Math.pow(1.05, currentCount)
   
   return numericToString(multiplyNumeric(base, multiplier.toString()))
 }
